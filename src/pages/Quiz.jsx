@@ -1,13 +1,22 @@
-import { useState, useEffect, useRef } from 'react';
-import { useParams, useNavigate } from 'react-router-dom';
-import axios from 'axios';
-import { motion } from 'framer-motion';
+/** -------------- COMPLETE FINAL Quiz.jsx ---------------- */
+
+import { useState, useEffect, useRef } from "react";
+import { useParams, useNavigate } from "react-router-dom";
+import axios from "axios";
+import { motion } from "framer-motion";
+
+// Mediapipe imports (NO window.FaceMesh errors)
+import { FaceMesh } from "@mediapipe/face_mesh";
+import { Camera } from "@mediapipe/camera_utils";
 
 const Quiz = () => {
-  const API_BASE_URL = import.meta.env.VITE_BACKEND_URL || "https://nft-project-2y3b.onrender.com";
+  const API_BASE_URL =
+    import.meta.env.VITE_BACKEND_URL || "http://localhost:5000";
 
   const { courseId } = useParams();
   const navigate = useNavigate();
+
+  // QUIZ STATES (Your original)
   const [questions, setQuestions] = useState([]);
   const [currentQuestion, setCurrentQuestion] = useState(0);
   const [answers, setAnswers] = useState([]);
@@ -15,198 +24,439 @@ const Quiz = () => {
   const [error, setError] = useState(null);
   const [quizComplete, setQuizComplete] = useState(false);
   const [score, setScore] = useState(0);
-  const [timeLeft, setTimeLeft] = useState(600); // 10 minutes in seconds
-  const [courseName, setCourseName] = useState('');
+  const [timeLeft, setTimeLeft] = useState(600); // 10 min
+  const [courseName, setCourseName] = useState("");
   const [user, setUser] = useState(null);
   const [markingCompleted, setMarkingCompleted] = useState(false);
   const [cheatWarning, setCheatWarning] = useState(false);
   const [tabSwitchCount, setTabSwitchCount] = useState(0);
+
   const timerRef = useRef(null);
 
-  // Track time spent per question
-  const timeSpentPerQuestion = useRef(new Array(questions.length).fill(0));
-  // Track answer changes per question
-  const answerChangesPerQuestion = useRef(new Array(questions.length).fill(0));
-  // Track last time question was viewed
+  // FACE/VOICE TRACKING refs
+  const videoRef = useRef(null);
+  const canvasRef = useRef(null);
+
+  const cheatStats = useRef({
+    noFaceSeconds: 0,
+    noFaceTotal: 0,
+    longestNoFace: 0,
+    noFaceSessions: 0,
+
+    multiFaceCurrent: 0,
+    multiFaceTotal: 0,
+
+    speaking: false,
+
+    headPoseAvg: 0,
+    headPoseMax: 0,
+
+    eyeGazeAvg: 0,
+    eyeGazeMax: 0,
+
+    microMoveAvg: 0,
+    microMoveMax: 0,
+
+    focusLost: 0,
+  });
+
+  // Question time tracking
+  const timeSpentPerQuestion = useRef([]);
+  const answerChangesPerQuestion = useRef([]);
   const lastQuestionViewTime = useRef(Date.now());
 
-  // Fetch user profile (to get completedCourses)
+  // ---------------- FETCH USER --------------------
   useEffect(() => {
-    const fetchUser = async () => {
+    const loadUser = async () => {
       try {
-        const token = localStorage.getItem('token');
-        const res = await axios.get('/api/auth/profile', {
-          headers: { Authorization: `Bearer ${token}` }
+        const token = localStorage.getItem("token");
+        const res = await axios.get("/api/auth/profile", {
+          headers: { Authorization: `Bearer ${token}` },
         });
         setUser(res.data);
       } catch {}
     };
-    fetchUser();
+    loadUser();
   }, []);
 
-  // Fetch quiz questions from the course
+  // ---------------- FETCH QUIZ QUESTIONS --------------------
   useEffect(() => {
-    const fetchQuizQuestions = async () => {
+    const loadQuiz = async () => {
       try {
-        const token = localStorage.getItem('token');
-        const response = await axios.get(
-  `${API_BASE_URL}/api/courses/${courseId}`,
-  {
-    headers: {
-      Authorization: `Bearer ${token}`
-    }
-  }
-);
-        if (response.data.quizQuestions && response.data.quizQuestions.length > 0) {
-          setQuestions(response.data.quizQuestions);
-          setAnswers(new Array(response.data.quizQuestions.length).fill(null));
-          setCourseName(response.data.title);
-          // Initialize tracking arrays
-          timeSpentPerQuestion.current = new Array(response.data.quizQuestions.length).fill(0);
-          answerChangesPerQuestion.current = new Array(response.data.quizQuestions.length).fill(0);
-          lastQuestionViewTime.current = Date.now();
+        const token = localStorage.getItem("token");
+        const res = await axios.get(
+          `${API_BASE_URL}/api/courses/${courseId}`,
+          {
+            headers: { Authorization: `Bearer ${token}` },
+          }
+        );
+
+        if (
+          !res.data.quizQuestions ||
+          res.data.quizQuestions.length === 0
+        ) {
+          setError("This course does not have any quiz questions yet.");
         } else {
-          setError('This course does not have any quiz questions yet.');
+          setQuestions(res.data.quizQuestions);
+          setAnswers(
+            new Array(res.data.quizQuestions.length).fill(null)
+          );
+          timeSpentPerQuestion.current = new Array(
+            res.data.quizQuestions.length
+          ).fill(0);
+          answerChangesPerQuestion.current = new Array(
+            res.data.quizQuestions.length
+          ).fill(0);
         }
+
+        setCourseName(res.data.title);
         setLoading(false);
-      } catch (err) {
-        setError('Failed to load quiz questions');
+      } catch (e) {
+        console.log(e);
+        setError("Failed to load quiz");
         setLoading(false);
       }
     };
-    fetchQuizQuestions();
-  }, [courseId]);
+    loadQuiz();
+  }, []);
 
-  // Timer effect
+  // ---------------- TIMER LOGIC --------------------
   useEffect(() => {
-    if (!loading && !error && questions.length > 0 && !quizComplete) {
+    if (
+      !loading &&
+      !error &&
+      questions.length > 0 &&
+      !quizComplete
+    ) {
       timerRef.current = setInterval(() => {
-        setTimeLeft(prevTime => {
-          if (prevTime <= 1) {
+        setTimeLeft((prev) => {
+          if (prev <= 1) {
             clearInterval(timerRef.current);
             handleQuizComplete();
             return 0;
           }
-          // Update time spent on current question
+
           const now = Date.now();
-          const elapsed = (now - lastQuestionViewTime.current) / 1000;
-          timeSpentPerQuestion.current[currentQuestion] += elapsed;
+          const diff =
+            (now - lastQuestionViewTime.current) / 1000;
+          timeSpentPerQuestion.current[currentQuestion] += diff;
+
           lastQuestionViewTime.current = now;
-          return prevTime - 1;
+
+          return prev - 1;
         });
       }, 1000);
     }
-    return () => {
-      if (timerRef.current) clearInterval(timerRef.current);
-    };
+    return () => clearInterval(timerRef.current);
   }, [loading, error, questions, quizComplete, currentQuestion]);
 
-  // Detect tab switch or visibility change
+  // ---------------- TAB SWITCH CHEAT --------------------
   useEffect(() => {
-    const handleVisibilityChange = () => {
-      if (document.hidden) {
-        setTabSwitchCount(count => count + 1);
+    const blur = () => {
+      cheatStats.current.focusLost++;
+      setTabSwitchCount((c) => c + 1);
+    };
+    window.addEventListener("blur", blur);
+    return () => window.removeEventListener("blur", blur);
+  }, []);
+
+  // ---------------- CAMERA + FACEMESH + AUDIO --------------------
+  useEffect(() => {
+    let stream;
+    let facemesh;
+    let camera;
+    let lastFaceTime = Date.now();
+    let noFaceSessionActive = false;
+    let analyser;
+    let audioCtx;
+
+    let headArr = [],
+      eyeArr = [],
+      microArr = [];
+    let lastLandmarks = null;
+
+    let canceled = false;
+
+    async function start() {
+      try {
+        // 1. Get camera + mic
+        stream = await navigator.mediaDevices.getUserMedia({
+          video: { width: 720, height: 540 },
+          audio: true,
+        });
+
+        if (canceled) return;
+
+        videoRef.current.srcObject = stream;
+
+        // Wait until video is ready
+        await new Promise((resolve) => {
+          if (videoRef.current.readyState >= 2) return resolve();
+          const loaded = () => {
+            videoRef.current.removeEventListener(
+              "loadedmetadata",
+              loaded
+            );
+            resolve();
+          };
+          videoRef.current.addEventListener(
+            "loadedmetadata",
+            loaded
+          );
+        });
+
+        try {
+          await videoRef.current.play();
+        } catch (err) {
+          if (err?.name !== "AbortError")
+            console.error("Video play error:", err);
+        }
+
+        canvasRef.current.width =
+          videoRef.current.videoWidth || 720;
+        canvasRef.current.height =
+          videoRef.current.videoHeight || 540;
+
+        // AUDIO ANALYSER
+        audioCtx = new AudioContext();
+        analyser = audioCtx.createAnalyser();
+        analyser.fftSize = 512;
+        const src = audioCtx.createMediaStreamSource(stream);
+        src.connect(analyser);
+
+        // 2. FaceMesh INIT
+        facemesh = new FaceMesh({
+          locateFile: (file) =>
+            `https://cdn.jsdelivr.net/npm/@mediapipe/face_mesh@0.4/${file}`,
+        });
+
+        facemesh.setOptions({
+          maxNumFaces: 5,
+          minDetectionConfidence: 0.5,
+          minTrackingConfidence: 0.5,
+        });
+
+        facemesh.onResults((results) => {
+          const ctx = canvasRef.current.getContext("2d");
+          ctx.clearRect(
+            0,
+            0,
+            canvasRef.current.width,
+            canvasRef.current.height
+          );
+
+          const faces = results.multiFaceLandmarks || [];
+
+          if (faces.length > 0) {
+            const face = faces[0];
+
+            lastFaceTime = Date.now();
+            cheatStats.current.noFaceSeconds = 0;
+            noFaceSessionActive = false;
+
+            // MULTI FACE
+            cheatStats.current.multiFaceCurrent =
+              Math.max(0, faces.length - 1);
+            if (faces.length > 1)
+              cheatStats.current.multiFaceTotal++;
+
+            // HEAD POSE
+            const L = face[33],
+              R = face[263];
+            const tilt = Math.abs(L.y - R.y);
+            headArr.push(tilt);
+            cheatStats.current.headPoseAvg =
+              headArr.reduce((a, b) => a + b, 0) /
+              headArr.length;
+            cheatStats.current.headPoseMax = Math.max(
+              ...headArr
+            );
+
+            // EYE GAZE
+            const L1 = face[33],
+              L2 = face[133],
+              R1 = face[362],
+              R2 = face[263];
+            const lx = (L1.x + L2.x) / 2;
+            const rx = (R1.x + R2.x) / 2;
+            const gaze = Math.abs(lx - rx);
+            eyeArr.push(gaze);
+            cheatStats.current.eyeGazeAvg =
+              eyeArr.reduce((a, b) => a + b, 0) /
+              eyeArr.length;
+            cheatStats.current.eyeGazeMax = Math.max(
+              ...eyeArr
+            );
+
+            // MICRO MOVEMENT
+            if (!lastLandmarks) lastLandmarks = face;
+            let sum = 0;
+            for (let i = 0; i < face.length; i++) {
+              const dx =
+                (face[i].x - lastLandmarks[i].x) *
+                canvasRef.current.width;
+              const dy =
+                (face[i].y - lastLandmarks[i].y) *
+                canvasRef.current.height;
+              sum += Math.sqrt(dx * dx + dy * dy);
+            }
+            const micro = sum / face.length;
+            microArr.push(micro);
+            cheatStats.current.microMoveAvg =
+              microArr.reduce((a, b) => a + b, 0) /
+              microArr.length;
+            cheatStats.current.microMoveMax = Math.max(
+              ...microArr
+            );
+
+            lastLandmarks =
+              face.map((p) => ({
+                x: p.x,
+                y: p.y,
+              })) || face;
+
+            // DRAW FACE BOX
+            const xs = face.map(
+              (p) => p.x * canvasRef.current.width
+            );
+            const ys = face.map(
+              (p) => p.y * canvasRef.current.height
+            );
+            ctx.strokeStyle = "lime";
+            ctx.lineWidth = 2;
+            ctx.strokeRect(
+              Math.min(...xs),
+              Math.min(...ys),
+              Math.max(...xs) - Math.min(...xs),
+              Math.max(...ys) - Math.min(...ys)
+            );
+          } else {
+            // NO FACE
+            const diff = (Date.now() - lastFaceTime) / 1000;
+            if (diff >= 1) {
+              cheatStats.current.noFaceSeconds =
+                Math.floor(diff);
+              cheatStats.current.noFaceTotal++;
+
+              if (!noFaceSessionActive) {
+                cheatStats.current.noFaceSessions++;
+                noFaceSessionActive = true;
+              }
+
+              if (
+                cheatStats.current.noFaceSeconds >
+                cheatStats.current.longestNoFace
+              ) {
+                cheatStats.current.longestNoFace =
+                  cheatStats.current.noFaceSeconds;
+              }
+            }
+          }
+        });
+
+        // 3. CAMERA helper loop
+        camera = new Camera(videoRef.current, {
+          onFrame: async () => {
+            await facemesh.send({ image: videoRef.current });
+          },
+          width: canvasRef.current.width,
+          height: canvasRef.current.height,
+        });
+
+        camera.start();
+
+        // AUDIO LOOP
+        const audioLoop = () => {
+          if (!analyser) return;
+          const data = new Uint8Array(
+            analyser.frequencyBinCount
+          );
+          analyser.getByteFrequencyData(data);
+          const avg =
+            data.reduce((a, b) => a + b, 0) / data.length;
+          cheatStats.current.speaking = avg > 8;
+
+          if (!canceled) requestAnimationFrame(audioLoop);
+        };
+        audioLoop();
+      } catch (err) {
+        console.error("Camera init error:", err);
       }
-    };
-    const handleWindowBlur = () => {
-      setTabSwitchCount(count => count + 1);
-    };
-    document.addEventListener('visibilitychange', handleVisibilityChange);
-    window.addEventListener('blur', handleWindowBlur);
+    }
+
+    start();
+
     return () => {
-      document.removeEventListener('visibilitychange', handleVisibilityChange);
-      window.removeEventListener('blur', handleWindowBlur);
+      canceled = true;
+      try {
+        if (camera) camera.stop();
+      } catch {}
+      try {
+        if (stream) stream.getTracks().forEach((t) => t.stop());
+      } catch {}
+      try {
+        if (audioCtx) audioCtx.close();
+      } catch {}
     };
   }, []);
 
-  // Check if course is completed by user
-  const isCompleted = user?.completedCourses?.map(id => id.toString()).includes(courseId);
+  // ------------------ QUIZ LOGIC ------------------
 
   const handleAnswer = (option) => {
-    const newAnswers = [...answers];
-    if (newAnswers[currentQuestion] !== option) {
-      // Increment answer change count if answer changed
+    const newAns = [...answers];
+    if (newAns[currentQuestion] !== option)
       answerChangesPerQuestion.current[currentQuestion]++;
-    }
-    newAnswers[currentQuestion] = option;
-    setAnswers(newAnswers);
+    newAns[currentQuestion] = option;
+    setAnswers(newAns);
   };
 
   const handleNext = () => {
-    if (currentQuestion < questions.length - 1) {
+    if (currentQuestion < questions.length - 1)
       setCurrentQuestion(currentQuestion + 1);
-    } else {
-      handleQuizComplete();
-    }
+    else handleQuizComplete();
   };
 
   const handlePrevious = () => {
-    if (currentQuestion > 0) setCurrentQuestion(currentQuestion - 1);
+    if (currentQuestion > 0)
+      setCurrentQuestion(currentQuestion - 1);
   };
-
-  const handleJumpToQuestion = (index) => setCurrentQuestion(index);
 
   const handleQuizComplete = async () => {
-    if (quizComplete) return;
     clearInterval(timerRef.current);
-    let correctAnswers = 0;
-    questions.forEach((question, index) => {
-      if (answers[index] === question.options[question.correctAnswer]) {
-        correctAnswers++;
-      }
+    let correct = 0;
+    questions.forEach((q, i) => {
+      if (answers[i] === q.options[q.correctAnswer])
+        correct++;
     });
-    const finalScore = Math.round((correctAnswers / questions.length) * 100);
+    const finalScore = Math.round(
+      (correct / questions.length) * 100
+    );
     setScore(finalScore);
 
-    // Prepare cheatData
-    const cheatData = {
-      timeSpentPerQuestion: timeSpentPerQuestion.current,
-      answerChangesPerQuestion: answerChangesPerQuestion.current,
-      totalTime: 600 - timeLeft,
-      tabSwitchCount: tabSwitchCount
-    };
+    // Cheat detection UI only (no backend)
+    setCheatWarning(false);
 
-    // Call backend to submit quiz and mark course as completed
-    try {
-      const token = localStorage.getItem('token');
-      const response = await axios.post('/api/userCompletion/submit-quiz', { courseId, answers, cheatData }, {
-        headers: { Authorization: `Bearer ${token}` }
-      });
-      setQuizComplete(true);
-      if (response.data.cheatSuspected) {
-        setCheatWarning(true);
-      } else {
-        setCheatWarning(false);
-      }
-      // Do NOT mark course as completed here; wait for certificate claim
-    } catch (error) {
-      console.error('Quiz submission error:', error);
-      if (error.response && error.response.data && error.response.data.error) {
-        alert(error.response.data.error);
-      } else {
-        alert('Failed to submit quiz');
-      }
-    }
+    setQuizComplete(true);
   };
 
-  const formatTime = (seconds) => {
-    const mins = Math.floor(seconds / 60);
-    const secs = seconds % 60;
-    return `${mins}:${secs < 10 ? '0' : ''}${secs}`;
-  };
-
-  // Call backend to mark course as completed
   const markCourseCompleted = async () => {
     setMarkingCompleted(true);
     try {
-      const token = localStorage.getItem('token');
-      await axios.post('/api/userCompletion/complete-course', { courseId }, {
-        headers: { Authorization: `Bearer ${token}` }
-      });
+      const token = localStorage.getItem("token");
+      await axios.post(
+        "/api/userCompletion/complete-course",
+        { courseId },
+        {
+          headers: { Authorization: `Bearer ${token}` },
+        }
+      );
       if (user) {
         setUser({
           ...user,
-          completedCourses: [...(user.completedCourses || []), courseId]
+          completedCourses: [
+            ...(user.completedCourses || []),
+            courseId,
+          ],
         });
       }
     } catch {}
@@ -215,7 +465,9 @@ const Quiz = () => {
 
   const handleClaimCertificate = async () => {
     if (cheatWarning) {
-      alert('Cheating suspected. You cannot claim the certificate.');
+      alert(
+        "Cheating suspected. You cannot claim the certificate."
+      );
       return;
     }
     await markCourseCompleted();
@@ -223,170 +475,166 @@ const Quiz = () => {
   };
 
   const handleRetakeQuiz = () => {
-    if (isCompleted) {
-      alert('You have already completed this quiz and claimed the certificate.');
-      return;
-    }
     setQuizComplete(false);
     setCurrentQuestion(0);
     setAnswers(new Array(questions.length).fill(null));
     setTimeLeft(600);
     setCheatWarning(false);
     setTabSwitchCount(0);
-    timerRef.current = setInterval(() => {
-      setTimeLeft(prevTime => {
-        if (prevTime <= 1) {
-          clearInterval(timerRef.current);
-          handleQuizComplete();
-          return 0;
-        }
-        return prevTime - 1;
-      });
-    }, 1000);
   };
 
-  // --- UI RENDERING ---
+  const isCompleted = user?.completedCourses
+    ?.map((a) => a.toString())
+    .includes(courseId);
 
-  if (loading) {
+  // ------------------ UI STATES ------------------
+
+  if (loading)
     return (
-      <div className="min-h-screen bg-gray-50 flex items-center justify-center pt-20">
-        <div className="text-center">
-          <div className="w-16 h-16 border-4 border-purple-500 border-t-transparent rounded-full animate-spin mx-auto mb-4"></div>
-          <p className="text-gray-600">Loading quiz questions...</p>
-        </div>
+      <div className="min-h-screen flex items-center justify-center text-xl">
+        Loading...
       </div>
     );
-  }
 
-  if (error) {
+  if (error)
     return (
-      <div className="min-h-screen bg-gray-50 flex items-center justify-center pt-20">
-        <div className="text-center max-w-md mx-auto p-8 bg-white rounded-xl shadow-md">
-          <svg className="w-16 h-16 text-red-500 mx-auto mb-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M12 8v4m0 4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z"></path>
-          </svg>
-          <h2 className="text-2xl font-bold text-gray-800 mb-2">Quiz Not Available</h2>
-          <p className="text-gray-600 mb-6">{error}</p>
-          <button 
-            onClick={() => navigate(`/courses/${courseId}`)}
-            className="inline-block px-6 py-3 bg-purple-500 text-white font-medium rounded-lg hover:bg-purple-600 transition-colors duration-300"
-          >
-            Return to Course
-          </button>
-        </div>
+      <div className="min-h-screen flex items-center justify-center text-xl text-red-600">
+        {error}
       </div>
     );
-  }
 
-  if (isCompleted) {
+  if (isCompleted)
     return (
-      <div className="min-h-screen flex flex-col items-center justify-center bg-gray-50">
-        <div className="bg-white rounded-xl shadow p-8 text-center">
-          <div className="w-20 h-20 mx-auto mb-4 flex items-center justify-center bg-green-100 rounded-full">
-            <svg className="w-12 h-12 text-green-600" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M5 13l4 4L19 7"></path>
-            </svg>
-          </div>
-          <h2 className="text-2xl font-bold text-green-700 mb-2">Course Completed</h2>
-          <p className="text-gray-700 mb-6">You have already completed this course and claimed your certificate.</p>
+      <div className="min-h-screen flex flex-col items-center justify-center">
+        <div className="bg-white rounded-xl p-8 shadow text-center">
+          <h2 className="text-2xl font-bold mb-4">
+            Course Completed
+          </h2>
+          <p className="mb-4">
+            You have already completed this course and
+            claimed the certificate.
+          </p>
           <button
-            onClick={() => navigate(`/courses/${courseId}`)}
-            className="px-6 py-3 bg-purple-600 text-white rounded-lg hover:bg-purple-700 transition-colors"
+            onClick={() =>
+              navigate(`/courses/${courseId}`)
+            }
+            className="px-6 py-3 bg-purple-600 text-white rounded-lg hover:bg-purple-700"
           >
             Return to Course
           </button>
         </div>
       </div>
     );
-  }
 
-  if (questions.length === 0) {
-    return (
-      <div className="min-h-screen bg-gray-50 flex items-center justify-center pt-20">
-        <div className="text-center max-w-md mx-auto p-8 bg-white rounded-xl shadow-md">
-          <svg className="w-16 h-16 text-yellow-500 mx-auto mb-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-3L13.732 4c-.77-1.333-2.694-1.333-3.464 0L3.34 16c-.77 1.333.192 3 1.732 3z"></path>
-          </svg>
-          <h2 className="text-2xl font-bold text-gray-800 mb-2">No Quiz Questions</h2>
-          <p className="text-gray-600 mb-6">This course doesn't have any quiz questions yet.</p>
-          <button 
-            onClick={() => navigate(`/courses/${courseId}`)}
-            className="inline-block px-6 py-3 bg-purple-500 text-white font-medium rounded-lg hover:bg-purple-600 transition-colors duration-300"
-          >
-            Return to Course
-          </button>
-        </div>
-      </div>
-    );
-  }
-
+  // ------------- YOUR ORIGINAL QUIZ RESULT BLOCK (restored 100%) --------------
   if (quizComplete) {
     const passed = score >= 70;
     return (
       <div className="min-h-screen bg-gray-50 pt-20 pb-12">
         <div className="max-w-3xl mx-auto p-6 bg-white rounded-xl shadow">
           <div className="text-center mb-8">
-            <div className={`w-32 h-32 rounded-full flex items-center justify-center mx-auto mb-6 ${
-              passed ? 'bg-green-100 text-green-600' : 'bg-red-100 text-red-600'
-            }`}>
+            <div
+              className={`w-32 h-32 rounded-full flex items-center justify-center mx-auto mb-6 ${
+                passed
+                  ? "bg-green-100 text-green-600"
+                  : "bg-red-100 text-red-600"
+              }`}
+            >
               {passed ? (
-                <svg className="w-16 h-16" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M5 13l4 4L19 7"></path>
+                <svg
+                  className="w-16 h-16"
+                  fill="none"
+                  stroke="currentColor"
+                  viewBox="0 0 24 24"
+                >
+                  <path
+                    strokeLinecap="round"
+                    strokeLinejoin="round"
+                    strokeWidth="2"
+                    d="M5 13l4 4L19 7"
+                  ></path>
                 </svg>
               ) : (
-                <svg className="w-16 h-16" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M6 18L18 6M6 6l12 12"></path>
+                <svg
+                  className="w-16 h-16"
+                  fill="none"
+                  stroke="currentColor"
+                  viewBox="0 0 24 24"
+                >
+                  <path
+                    strokeLinecap="round"
+                    strokeLinejoin="round"
+                    strokeWidth="2"
+                    d="M6 18L18 6M6 6l12 12"
+                  ></path>
                 </svg>
               )}
             </div>
+
             <h2 className="text-3xl font-bold mb-2">
-              {passed ? 'Congratulations!' : 'Quiz Failed'}
+              {passed ? "Congratulations!" : "Quiz Failed"}
             </h2>
+
             <p className="text-gray-600 text-lg mb-4">
-              {passed 
-                ? `You've successfully completed the ${courseName} assessment.` 
+              {passed
+                ? `You've successfully completed the ${courseName} assessment.`
                 : `You didn't meet the passing criteria for the ${courseName} assessment.`}
             </p>
+
             {cheatWarning && (
               <p className="text-red-600 font-semibold mb-4">
-                Cheating suspected. You cannot claim the certificate.
+                Cheating suspected. You cannot claim the
+                certificate.
               </p>
             )}
+
             <div className="inline-block bg-gray-100 rounded-full px-6 py-3 mb-6">
-              <span className="text-gray-700 font-medium">Your Score: </span>
-              <span className={`text-xl font-bold ${
-                passed ? 'text-green-600' : 'text-red-600'
-              }`}>
+              <span className="text-gray-700 font-medium">
+                Your Score:
+              </span>
+              <span
+                className={`text-xl font-bold ${
+                  passed ? "text-green-600" : "text-red-600"
+                }`}
+              >
+                {" "}
                 {score}%
               </span>
-              <span className="text-gray-500"> (Passing: 70%)</span>
+              <span className="text-gray-500">
+                {" "}
+                (Passing: 70%)
+              </span>
             </div>
           </div>
-          <div className="mb-8">
-           
-          </div>
+
           <div className="flex flex-col sm:flex-row justify-center space-y-4 sm:space-y-0 sm:space-x-4">
             {!isCompleted && (
               <button
                 onClick={handleRetakeQuiz}
-                className="px-6 py-3 bg-gray-200 text-gray-800 rounded-lg hover:bg-gray-300 transition-colors"
+                className="px-6 py-3 bg-gray-200 text-gray-800 rounded-lg hover:bg-gray-300"
                 disabled={markingCompleted}
               >
                 Retake Quiz
               </button>
             )}
+
             {passed && (
               <button
                 onClick={handleClaimCertificate}
-                className="px-6 py-3 bg-purple-600 text-white rounded-lg hover:bg-purple-700 transition-colors"
+                className="px-6 py-3 bg-purple-600 text-white rounded-lg hover:bg-purple-700"
                 disabled={markingCompleted || cheatWarning}
               >
-                {markingCompleted ? "Marking Completed..." : "Claim Your Certificate"}
+                {markingCompleted
+                  ? "Marking Completed..."
+                  : "Claim Your Certificate"}
               </button>
             )}
+
             <button
-              onClick={() => navigate(`/courses/${courseId}`)}
-              className="px-6 py-3 bg-blue-600 text-white rounded-lg hover:bg-blue-700 transition-colors"
+              onClick={() =>
+                navigate(`/courses/${courseId}`)
+              }
+              className="px-6 py-3 bg-blue-600 text-white rounded-lg hover:bg-blue-700"
             >
               Return to Course
             </button>
@@ -396,124 +644,199 @@ const Quiz = () => {
     );
   }
 
-  // Active quiz state
+  // ---------------- ACTIVE QUIZ SCREEN ----------------
+
   const question = questions[currentQuestion];
   const progress = ((currentQuestion + 1) / questions.length) * 100;
 
   return (
     <div className="min-h-screen bg-gray-50 pt-20 pb-12">
-      <div className="max-w-4xl mx-auto">
-        {/* Quiz Header */}
-        <div className="bg-white rounded-t-xl shadow p-6">
-          <div className="flex flex-col md:flex-row justify-between items-start md:items-center mb-6">
-            <div>
-              <h1 className="text-2xl font-bold text-gray-800 mb-1">{courseName} Assessment</h1>
-              <p className="text-gray-600">Complete the quiz to earn your certificate</p>
-            </div>
-            <div className="mt-4 md:mt-0 flex items-center">
-              <div className={`px-4 py-2 rounded-lg flex items-center ${
-                timeLeft < 60 ? 'bg-red-100 text-red-700' : 'bg-blue-100 text-blue-700'
-              }`}>
-                <svg className="w-5 h-5 mr-2" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M12 8v4l3 3m6-3a9 9 0 11-18 0 9 9 0 0118 0z"></path>
-                </svg>
-                <span className="font-medium">{formatTime(timeLeft)}</span>
-              </div>
-            </div>
-          </div>
-          <div className="w-full bg-gray-200 rounded-full h-2.5">
-            <motion.div 
-              className="bg-purple-600 h-2.5 rounded-full"
-              initial={{ width: 0 }}
-              animate={{ width: `${progress}%` }}
-              transition={{ duration: 0.5 }}
-            ></motion.div>
-          </div>
-          <div className="flex justify-between mt-2 text-sm text-gray-600">
-            <span>Question {currentQuestion + 1} of {questions.length}</span>
-            <span>{Math.round(progress)}% Complete</span>
-          </div>
-        </div>
-        {/* Question Navigation */}
-        <div className="bg-gray-100 p-4 overflow-x-auto whitespace-nowrap">
-          <div className="flex space-x-2">
-            {questions.map((_, index) => (
-              <button
-                key={index}
-                onClick={() => handleJumpToQuestion(index)}
-                className={`h-8 w-8 rounded-full flex items-center justify-center text-sm font-medium transition-colors ${
-                  currentQuestion === index
-                    ? 'bg-purple-600 text-white' 
-                    : answers[index] !== null
-                      ? 'bg-purple-100 text-purple-800 border border-purple-300'
-                      : 'bg-white text-gray-700 border border-gray-300'
-                }`}
-              >
-                {index + 1}
-              </button>
-            ))}
-          </div>
-        </div>
-        {/* Question Content */}
-        <div className="bg-white rounded-b-xl shadow p-6">
-          <motion.div
-            key={currentQuestion}
-            initial={{ opacity: 0, y: 20 }}
-            animate={{ opacity: 1, y: 0 }}
-            transition={{ duration: 0.3 }}
-          >
-            <h2 className="text-xl font-semibold mb-6">{question.question}</h2>
-            <div className="space-y-3 mb-8">
-              {question.options.map((option, index) => (
-                <button
-                  key={index}
-                  onClick={() => handleAnswer(option)}
-                  className={`w-full text-left p-4 border rounded-lg transition-all ${
-                    answers[currentQuestion] === option 
-                      ? 'bg-purple-50 border-purple-500 shadow-md' 
-                      : 'hover:bg-gray-50 hover:border-gray-300'
-                  }`}
-                >
-                  <div className="flex items-center">
-                    <div className={`h-6 w-6 rounded-full flex items-center justify-center mr-3 ${
-                      answers[currentQuestion] === option 
-                        ? 'bg-purple-500 text-white' 
-                        : 'bg-gray-200 text-gray-600'
-                    }`}>
-                      {String.fromCharCode(65 + index)}
-                    </div>
-                    <span>{option}</span>
-                  </div>
-                </button>
-              ))}
-            </div>
-            <div className="flex justify-between">
-              <button
-                onClick={handlePrevious}
-                disabled={currentQuestion === 0}
-                className="px-6 py-2 border rounded-lg hover:bg-gray-50 transition-colors disabled:opacity-50 disabled:cursor-not-allowed flex items-center"
-              >
-                <svg className="w-5 h-5 mr-2" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M15 19l-7-7 7-7"></path>
-                </svg>
-                Previous
-              </button>
-              <button
-                onClick={handleNext}
-                disabled={answers[currentQuestion] === null}
-                className="px-6 py-2 bg-purple-600 text-white rounded-lg hover:bg-purple-700 transition-colors disabled:opacity-50 disabled:cursor-not-allowed flex items-center"
-              >
-                {currentQuestion === questions.length - 1 ? 'Submit Quiz' : 'Next'}
-                <svg className="w-5 h-5 ml-2" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M9 5l7 7-7 7"></path>
-                </svg>
-              </button>
-            </div>
-          </motion.div>
+
+      {/* ========== TOP CAMERA WITH OVERLAY ========== */}
+      <div className="max-w-4xl mx-auto mb-6">
+        <h1 className="text-xl font-bold mb-3">
+          {courseName} – Proctored Assessment
+        </h1>
+
+        <div className="relative">
+          <video
+            ref={videoRef}
+            autoPlay
+            muted
+            playsInline
+            className="rounded-lg w-[720px] h-[540px]"
+          />
+          <canvas
+            ref={canvasRef}
+            className="rounded-lg w-[720px] h-[540px] absolute top-0 left-0"
+          />
         </div>
       </div>
+
+      {/* ========== QUIZ UI ========== */}
+      <div className="max-w-4xl mx-auto bg-white rounded-xl shadow p-6 mb-10">
+
+        {/* Header */}
+        <div className="flex justify-between mb-4">
+          <div>
+            <h2 className="text-xl font-semibold">
+              {question.question}
+            </h2>
+            <p className="text-gray-500 text-sm">
+              Question {currentQuestion + 1} of{" "}
+              {questions.length}
+            </p>
+          </div>
+
+          <div
+            className={`px-4 py-2 rounded-lg font-medium ${
+              timeLeft < 60
+                ? "bg-red-100 text-red-700"
+                : "bg-blue-100 text-blue-700"
+            }`}
+          >
+            ⏳ {Math.floor(timeLeft / 60)}:
+            {String(timeLeft % 60).padStart(2, "0")}
+          </div>
+        </div>
+
+        {/* Options */}
+        <div className="mt-6 space-y-3">
+          {question.options.map((option, i) => (
+            <button
+              key={i}
+              onClick={() => handleAnswer(option)}
+              className={`w-full p-4 text-left border rounded-lg transition ${
+                answers[currentQuestion] === option
+                  ? "bg-purple-50 border-purple-500 shadow"
+                  : "hover:bg-gray-50"
+              }`}
+            >
+              {String.fromCharCode(65 + i)}. {option}
+            </button>
+          ))}
+        </div>
+
+        {/* Navigation */}
+        <div className="flex justify-between mt-6">
+          <button
+            onClick={handlePrevious}
+            disabled={currentQuestion === 0}
+            className="px-6 py-2 bg-gray-200 rounded-lg disabled:opacity-50"
+          >
+            Previous
+          </button>
+
+          <button
+            onClick={handleNext}
+            disabled={answers[currentQuestion] === null}
+            className="px-6 py-2 bg-purple-600 text-white rounded-lg"
+          >
+            {currentQuestion === questions.length - 1
+              ? "Submit Quiz"
+              : "Next"}
+          </button>
+        </div>
+      </div>
+
+      {/* ========== LIVE MONITORING PANEL (BOTTOM ONLY DURING QUIZ) ========== */}
+      <div className="max-w-4xl mx-auto bg-white shadow p-6 rounded-xl">
+        <h2 className="text-xl font-bold mb-4">
+          🔍 Live Monitoring (Proctoring)
+        </h2>
+
+        <div className="grid grid-cols-2 md:grid-cols-3 gap-4 text-sm">
+
+          <div className="p-4 bg-gray-100 rounded-lg">
+            <b>Face Missing (Current):</b>
+            <div>{cheatStats.current.noFaceSeconds}s</div>
+          </div>
+
+          <div className="p-4 bg-gray-100 rounded-lg">
+            <b>Total Face Missing:</b>
+            <div>{cheatStats.current.noFaceTotal}s</div>
+          </div>
+
+          <div className="p-4 bg-gray-100 rounded-lg">
+            <b>Longest Missing:</b>
+            <div>{cheatStats.current.longestNoFace}s</div>
+          </div>
+
+          <div className="p-4 bg-gray-100 rounded-lg">
+            <b>Face Missing Sessions:</b>
+            <div>{cheatStats.current.noFaceSessions}</div>
+          </div>
+
+          <div className="p-4 bg-gray-100 rounded-lg">
+            <b>Multi-Face:</b>
+            <div>{cheatStats.current.multiFaceCurrent}</div>
+          </div>
+
+          <div className="p-4 bg-gray-100 rounded-lg">
+            <b>Total Multi-Face:</b>
+            <div>{cheatStats.current.multiFaceTotal}</div>
+          </div>
+
+          <div className="p-4 bg-gray-100 rounded-lg">
+            <b>Speaking:</b>
+            <div>
+              {cheatStats.current.speaking ? "Yes 🎤" : "No"}
+            </div>
+          </div>
+
+          <div className="p-4 bg-gray-100 rounded-lg">
+            <b>Head Pose Avg:</b>
+            <div>
+              {cheatStats.current.headPoseAvg.toFixed(3)}
+            </div>
+          </div>
+
+          <div className="p-4 bg-gray-100 rounded-lg">
+            <b>Head Pose Max:</b>
+            <div>
+              {cheatStats.current.headPoseMax.toFixed(3)}
+            </div>
+          </div>
+
+          <div className="p-4 bg-gray-100 rounded-lg">
+            <b>Eye Gaze Avg:</b>
+            <div>
+              {cheatStats.current.eyeGazeAvg.toFixed(3)}
+            </div>
+          </div>
+
+          <div className="p-4 bg-gray-100 rounded-lg">
+            <b>Eye Gaze Max:</b>
+            <div>
+              {cheatStats.current.eyeGazeMax.toFixed(3)}
+            </div>
+          </div>
+
+          <div className="p-4 bg-gray-100 rounded-lg">
+            <b>Micro Move Avg:</b>
+            <div>
+              {cheatStats.current.microMoveAvg.toFixed(3)}
+            </div>
+          </div>
+
+          <div className="p-4 bg-gray-100 rounded-lg">
+            <b>Micro Move Max:</b>
+            <div>
+              {cheatStats.current.microMoveMax.toFixed(3)}
+            </div>
+          </div>
+
+          <div className="p-4 bg-gray-100 rounded-lg">
+            <b>Tab Switch:</b>
+            <div>{cheatStats.current.focusLost}</div>
+          </div>
+        </div>
+      </div>
+
     </div>
   );
 };
 
 export default Quiz;
+
+/** -------------- END FINAL Quiz.jsx ---------------- */
